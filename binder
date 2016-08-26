@@ -1,0 +1,115 @@
+1.  Android系统binder机制是由client、server、servicemanager及binder驱动共同构成。其中重点是binder驱动，它实现在内核空间，其它三个都是处于用户空间；用户空间的三类组件直接和binder驱动进行通信，servicemanager是管理各类server，凡是注册过的server在servicemanager中都会保存一个相应的句柄，当client第一次发起对server的请求时，servicemanager会将对应的server句柄给到client，然后剩下的通信就是c/s & binder之间的事情了。
+
+2. 在用户空间也同样实现了binder.c文件(frameworks/native/cmds/servermanager/binder.c)，对应到内核的binder中，实现的功能包括binder的打开是和关闭、binder数据的读写等等；
+　　binder中重要的数据结构: 
+        struct binder_io {
+            char* data;
+            binder_size_t *offs;
+            size_t data_avail;
+            size_t offs_avail;
+
+            char *data0;
+            binder_size_t *offs0;
+            uint32_t flags;
+            uint32_t unused;
+        };
+
+        struct binder_state {
+            int fd;
+            void *mapped;
+            size_t mapsize;
+        };
+
+   大家都知道，类unix系统一切皆文件，fd表示打开的binder驱动，mapped表示分配的内存首地址，mapsize表示内存地址大小。（？？这里的内存是怎么映射的，要搞清楚，是直接页地址映射过去？，有时间看binder驱动）
+
+
+  要用到的知识点：
+  　　linux函数：　void* mmap(void *addr, size_t len, int prot, int flags, int fd, off_t offset)
+                   int munmap(void *addr, size_t len)
+                   int ioctl(int fd, int cmd, ...)
+　binder.c重要的函数：
+　struct binder_state* binder_open(size_t mapsize) 
+  {
+        struct binder_state *bs;                                                    //定义指针变量
+        bs = malloc(sizeof(*bs));                                                   //给变量分配空间
+        ......
+        bs->fd = open("/dev/binder", O_RDWR);                                       //打开binder驱动
+        ......
+        if ((ioctl(bs->fd, BINDER_VERSION, &vers) == -1) || ...)                    //获取binder的version
+        ......
+        bs->mapsize = mapsize;                                                      //给mapsize赋值
+        bs->mapped = mmap(NULL, mapsize, PROT_READ, MAP_PRIVATE, bs->fd, 0);        //使用mmap进行内存的映射，映射区的保护方式为只读，映射区特性是对映射区产生一个复制操作（copy-on-write)，不会写回源文件
+        ......
+  }
+
+
+　void binder_close(struct binder_state* bs)
+  {
+        munmap(bs->mapped, bs->mapsize);
+        close(bs->fd);
+        free(bs);
+  }
+
+  
+  int binder_become_context_manager(struct binder_state* bs)
+  {
+        return ioctl(bs->fd, BINDER_SET_CONTEXT_MGR, 0);
+  }
+　
+  int binder_write(struct binder_state *bs, void *data, size_t len)
+  {
+        struct binder_write_read bwr;
+        int res;
+
+        bwr.write_size = len;
+        bwr.write_consumed = 0;
+        bwr.write_buffer = (uintptr_t)data;
+        
+        bwr.read_size = 0;
+        bwr.read_consumed = 0;
+        bwr.read_buffer = 0;
+
+        res = ioctl(bs->fd, BINDER_WRITE_READ, &bwr);
+        .......
+  }
+  
+  binder很多没有理解，要结合binder驱动理解，后面补上.....
+
+3. servicemanager.c
+   servicemanager是android中一个比较重要的进程，从名字就可以看出来是service的管理者，用来统一管理系统中的其他服务的。
+   从servicemanager的主函数开始分析：
+   int main(int argc, char ** argv)
+   {
+        struct binder_state * bs;
+        bs = binder_open(128 * 1024);
+        ......
+        if( binder_become_context_manager(bs)) 
+        ......
+        binder_loop(bs, svcmgr_handler);
+        return 0;
+   }
+   主要做了三个动作，首先执行binder_open()方法，跟踪代码可以看到又回到了binder.c文件中，打开binder驱动，并在内存中映射了128Ｋ内存空间；然后通知binder设备，将自己注册成为smgr,注册smgr的条件是使用0号引用；最后进入循环，不停的去读取binder设备，看是否有service请求，如果有就调用svcmgr_handler的回调进行处理。
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
